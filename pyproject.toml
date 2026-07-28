@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gesturebloom"
+version = "0.1.0"
+description = "Gesture-driven procedural spiderlily: real-time hand landmarks to GPU render"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Henry Romero" }]
+keywords = ["computer-vision", "gesture-recognition", "mediapipe", "generative-art", "moderngl"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Multimedia :: Graphics",
+]
+
+# Base install is numpy + pyyaml only, so `pip install gesturebloom` never pulls
+# a 2 GB torch wheel on someone who just wants to read the geometry code.
+dependencies = ["numpy>=1.24", "pyyaml>=6.0"]
+
+[project.optional-dependencies]
+live = ["mediapipe>=0.10.9", "opencv-python>=4.8"]
+render = ["moderngl>=5.8", "moderngl-window>=2.4"]
+train = ["torch>=2.1"]
+export = ["onnx>=1.15", "onnxruntime>=1.16"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.3", "mypy>=1.8"]
+all = [
+  "mediapipe>=0.10.9", "opencv-python>=4.8",
+  "moderngl>=5.8", "moderngl-window>=2.4",
+  "torch>=2.1", "onnx>=1.15", "onnxruntime>=1.16",
+]
+
+[project.scripts]
+gesturebloom = "gesturebloom.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/HenryRomeo1/gesturebloom"
+Issues = "https://github.com/HenryRomeo1/gesturebloom/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+gesturebloom = ["render/shaders/*.vert", "render/shaders/*.frag"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = ["error::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
+ignore = [
+  "E501",   # line length handled by the formatter
+  "N803",   # allow math-convention argument names (R, K, T)
+  "N806",   # allow uppercase locals for matrices -- R, K, L match the papers
+  "RUF002", # unicode in docstrings is intentional (kappa, psi, arrows)
+  "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["N806"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["src/gesturebloom"]
+omit = ["*/render/window.py", "*/landmarks/source.py"]

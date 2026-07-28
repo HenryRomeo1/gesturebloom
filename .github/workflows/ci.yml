@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # No camera, no GPU, no display in CI. The whole suite still runs, because
+      # every stage can be driven from a recorded landmark stream.
+      - run: pip install -e '.[dev]'
+      - run: pytest tests/ -v
+      - run: ruff check src/ tests/
+      - run: gesturebloom bench --frames 300

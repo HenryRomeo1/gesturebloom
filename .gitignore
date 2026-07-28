@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Project artifacts
+checkpoints/
+*.pt
+*.onnx
+calibration.json
+data/*.npz
+!data/examples/*.npz
+out/
+*.mp4
+screenshot_*.png
+
+# Keep the generated geometry preview; it is the README image.
+!assets/geometry_preview.svg

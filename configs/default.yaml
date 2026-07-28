@@ -1,0 +1,36 @@
+# Default configuration. Every value here is a real tuning knob; the comments
+# say what to watch while you turn it.
+
+flower_seed: 7          # Per-flower form variation. Change for a different bloom.
+
+smoothing:
+  # Tune min_cutoff FIRST, with your hand held still: lower it until the
+  # shimmer disappears. Then tune beta with a fast gesture: raise it until the
+  # lag disappears. Doing it in the other order fights itself.
+  min_cutoff: 1.5       # Hz at zero velocity. Lower = smoother when still.
+  beta: 0.05            # Velocity coupling. Higher = less lag when moving fast.
+  d_cutoff: 1.0         # Derivative-estimate cutoff. Rarely needs changing.
+  hold_frames: 6        # Frames to hold the last pose through tracking dropout.
+
+render:
+  width: 1280
+  height: 720
+  bloom_passes: 2       # Each pass widens the glow; 2 is plenty at 720p.
+  bloom_strength: 0.85
+  vsync: true
+
+spotter:
+  # Do NOT tune these against a live webcam. Record a trace once, then use
+  # `gesturebloom tune` to grid-search offline in seconds.
+  enter_threshold: 0.65
+  exit_threshold: 0.40  # Must be well below enter_threshold; the gap kills chatter.
+  min_frames: 3         # Consecutive frames required. Rejects noise spikes.
+  refractory_frames: 12 # Blocks double-fires from mid-gesture probability dips.
+
+train:
+  batch_size: 128
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  window_length: 32     # Must be <= the TCN receptive field (31 at 4 blocks).
+  window_stride: 4      # Overlapping windows -- hence recording-level splits.
+  label_ramp: 3         # Soft onset target half-width, in frames.
