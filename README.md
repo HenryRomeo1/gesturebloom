@@ -191,6 +191,30 @@ def test_signals_actually_vary():
     assert values.std() > 0.02
 ```
 
+## What you see on screen
+
+The window composites three layers, and the split is deliberate:
+
+| Layer | Drawn by | Space |
+|---|---|---|
+| Camera feed + hand skeleton + parameter labels | OpenCV, into the numpy frame | image |
+| Flower ribbons | GLSL, into a transparent buffer | scene |
+| Bloom glow | separable Gaussian on a half-res bright pass | screen |
+
+The flower renders into a **transparent** buffer rather than over the camera
+feed, because the bloom bright-pass would otherwise glow the entire video and
+smear it. Camera and flower only meet in the final composite, where the flower is
+added emissively over a dimmed camera background — so the flower glows and the
+video stays sharp.
+
+The flower is anchored to your wrist in screen space (offset applied after
+projection and scaled by `w`, so it stays the same size wherever your hand is),
+which makes it read as growing out of your palm rather than floating in front of
+you.
+
+Live keys: `ESC`/`Q` quit, `SPACE` pause, `R` reset filters, `S` screenshot,
+`C` toggle camera feed, `K` toggle skeleton.
+
 ## Latency
 
 Interactive systems are judged on latency, not throughput — a pipeline can hold
@@ -239,9 +263,12 @@ gesturebloom train temporal --data data/ --epochs 80
 # Grid-search spotter thresholds offline against a recorded trace
 gesturebloom tune --probs traces/val.npz --truth traces/val_onsets.json
 
-# Run
+# Run -- live camera feed with skeleton overlay and the flower on top
 gesturebloom run --calibration calibration.json
 gesturebloom run --replay data/examples/demo.npz --headless
+
+# Verify GL and compile all shaders before debugging anything else
+gesturebloom gl-probe
 
 # Export and verify
 gesturebloom export checkpoints/pose_mlp.pt --out models/pose.onnx --task pose

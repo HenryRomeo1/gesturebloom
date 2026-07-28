@@ -59,6 +59,8 @@ def run_windowed(
     ``SPACE``        pause the landmark stream (freezes the flower, keeps rendering)
     ``R``            reset the filters and the mapper
     ``S``            save a single PNG screenshot
+    ``C``            toggle the camera feed background
+    ``K``            toggle the hand skeleton overlay
     """
     try:
         import moderngl_window as mglw
@@ -70,6 +72,7 @@ def run_windowed(
 
     from ..geometry.spiderlily import build_spiderlily
     from ..landmarks.canonical import try_canonicalize
+    from .overlay import draw_hud, draw_param_labels, draw_skeleton, wrist_anchor_ndc
     from .window import BloomRenderer
 
     if record_frames is not None:
@@ -95,7 +98,19 @@ def run_windowed(
             self.n_tracked = 0
             self.paused = False
             self.finished = False
-            print("Running. ESC/Q quit | SPACE pause | R reset | S screenshot")
+            self.show_camera = True
+            self.show_skeleton = True
+            # Raw (pre-canonical) landmarks, kept for drawing. Canonical
+            # coordinates have position and scale removed by design, so they
+            # cannot be drawn back onto the image.
+            self.raw_landmarks = None
+            self.tracking = False
+            self.anchor = (0.0, 0.0)
+            self.smoothed_fps = 0.0
+            print(
+                "Running. ESC/Q quit | SPACE pause | R reset | S screenshot | "
+                "C camera feed | K skeleton"
+            )
 
         # ---- frame pump ---------------------------------------------------- #
         def _pull(self) -> None:
@@ -106,17 +121,49 @@ def run_windowed(
                 return
 
             self.n_frames += 1
+            if dt > 0:
+                inst = 1.0 / dt
+                self.smoothed_fps = inst if self.smoothed_fps == 0 else (
+                    0.9 * self.smoothed_fps + 0.1 * inst
+                )
+
             smoothed = smoother.update(lm, dt)
             if smoothed is None:
+                self.tracking = False
+                self.raw_landmarks = None
                 return
             result = try_canonicalize(smoothed, hand)
             if result is None:
+                self.tracking = False
                 return
             canonical, hand_frame = result
             self.n_tracked += 1
+            self.tracking = True
+            # Smoothed but still image-space -- exactly what the overlay needs.
+            self.raw_landmarks = smoothed
             self.params = mapper.update(canonical, dt=dt, basis=hand_frame.basis)
+            self.anchor = wrist_anchor_ndc(smoothed, y_offset=render_config.anchor_y_offset)
 
         # ---- render callback ----------------------------------------------- #
+        def _compose_background(self):
+            """Annotate a copy of the camera frame with skeleton + HUD."""
+            frame = getattr(source, "last_frame", None)
+            if frame is None or not self.show_camera:
+                return None
+            # Copy: the source owns that buffer and reuses it next frame.
+            annotated = frame.copy()
+            if self.show_skeleton and self.raw_landmarks is not None:
+                draw_skeleton(annotated, self.raw_landmarks)
+                draw_param_labels(annotated, self.raw_landmarks, self.params)
+            draw_hud(
+                annotated,
+                self.params,
+                fps=self.smoothed_fps,
+                tracking=self.tracking,
+                backend=getattr(source, "backend_name", ""),
+            )
+            return annotated
+
         def on_render(self, time: float, frametime: float) -> None:
             if not self.paused:
                 self._pull()
@@ -125,7 +172,13 @@ def run_windowed(
                 self.params["grow"], self.params["bloom"], seed=flower_seed
             )
             # sway maps [0,1] -> a gentle +/- 0.6 rad orbit
-            self.renderer.draw(strands, self.params, spin=self.params.get("sway", 0.5) * 1.2 - 0.6)
+            self.renderer.draw(
+                strands,
+                self.params,
+                spin=self.params.get("sway", 0.5) * 1.2 - 0.6,
+                background=self._compose_background(),
+                anchor=self.anchor if self.show_camera else (0.0, 0.0),
+            )
 
             if record_frames is not None:
                 self._dump_frame()
@@ -162,6 +215,12 @@ def run_windowed(
                 smoother.reset()
                 mapper.reset()
                 print("filters reset")
+            elif key == keys.C:
+                self.show_camera = not self.show_camera
+                print(f"camera feed {'on' if self.show_camera else 'off'}")
+            elif key == keys.K:
+                self.show_skeleton = not self.show_skeleton
+                print(f"skeleton {'on' if self.show_skeleton else 'off'}")
             elif key == keys.S:
                 out = Path(f"screenshot_{self.n_frames:05d}.png")
                 try:

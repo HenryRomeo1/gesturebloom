@@ -43,6 +43,12 @@ class RenderConfig:
     stamen_color: tuple[float, float, float] = (1.0, 0.82, 0.35)
     camera_distance: float = 3.4
     fov_degrees: float = 42.0
+    camera_dim: float = 0.62
+    """How much to dim the camera feed. Below ~0.7 the flower reads clearly on
+    top; at 1.0 it competes with a bright, busy video background and loses."""
+    anchor_y_offset: float = -0.18
+    """Pushes the flower slightly below the wrist so it appears to grow *out of*
+    the hand rather than through it."""
 
 
 def _perspective(fov_deg: float, aspect: float, near: float = 0.1, far: float = 100.0) -> np.ndarray:
@@ -144,6 +150,12 @@ class BloomRenderer:
         self.strand_program = self._load_program("strand")
         self.blur_program = self._load_program("blur")
         self.composite_program = self._load_program("composite")
+        self.background_program = self._load_program("background")
+        self._camera_tex = None
+        # 1x1 black stand-in, bound when there is no camera frame. Sampling an
+        # unbound texture unit is undefined behaviour and shows up as garbage or
+        # a driver crash, so always bind something valid.
+        self._empty_tex = self.ctx.texture((1, 1), 3, data=b"\x00\x00\x00")
 
         self._vbo = self.ctx.buffer(reserve=4 * 6 * 8192, dynamic=True)
         self._vao = self.ctx.vertex_array(
@@ -156,6 +168,9 @@ class BloomRenderer:
         # which is a miserable bug to track down after the fact.
         self._composite_vao = self.ctx.vertex_array(
             self.composite_program, [(self._quad[1], "2f 2f", "in_position", "in_uv")]
+        )
+        self._background_vao = self.ctx.vertex_array(
+            self.background_program, [(self._quad[1], "2f 2f", "in_position", "in_uv")]
         )
 
     def _load_program(self, name: str):
@@ -182,6 +197,17 @@ class BloomRenderer:
         vbo = self.ctx.buffer(quad.tobytes())
         return self.ctx.vertex_array(self.blur_program, [(vbo, "2f 2f", "in_position", "in_uv")]), vbo
 
+    def _upload_camera(self, frame: np.ndarray):
+        """Upload an RGB frame, (re)allocating the texture if the size changed."""
+        h, w = frame.shape[:2]
+        if self._camera_tex is None or self._camera_tex.size != (w, h):
+            if self._camera_tex is not None:
+                self._camera_tex.release()
+            self._camera_tex = self.ctx.texture((w, h), 3, dtype="f1")
+            self._camera_tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
+        self._camera_tex.write(np.ascontiguousarray(frame, dtype=np.uint8).tobytes())
+        return self._camera_tex
+
     def _mvp(self, spin: float = 0.0) -> np.ndarray:
         c = self.config
         eye = np.array(
@@ -196,21 +222,41 @@ class BloomRenderer:
         proj = _perspective(c.fov_degrees, c.width / c.height)
         return (proj @ view).astype(np.float32)
 
-    def draw(self, strands: list[Strand], params: dict[str, float], spin: float = 0.0) -> None:
-        """Render one frame. Call inside your windowing library's draw callback."""
+    def draw(
+        self,
+        strands: list[Strand],
+        params: dict[str, float],
+        spin: float = 0.0,
+        background: np.ndarray | None = None,
+        anchor: tuple[float, float] = (0.0, 0.0),
+    ) -> None:
+        """Render one frame. Call inside your windowing library's draw callback.
+
+        Parameters
+        ----------
+        background:
+            Optional ``(H, W, 3)`` uint8 RGB camera frame, already annotated with
+            the skeleton overlay. Drawn opaque behind the flower.
+        anchor:
+            Screen-space NDC offset for the flower, so it can track the hand.
+        """
         import moderngl
 
         data, counts = build_batch(strands)
         c = self.config
 
+        # Flower renders into a TRANSPARENT buffer. This is the important part:
+        # if the camera feed were in this buffer, the bloom bright-pass would
+        # glow the whole video and the result looks like a smeared mess.
         self.scene_fbo.use()
-        self.ctx.clear(*c.background, 1.0)
+        self.ctx.clear(0.0, 0.0, 0.0, 0.0)
         if data.shape[0]:
             needed = data.nbytes
             if needed > self._vbo.size:
                 self._vbo.orphan(needed * 2)
             self._vbo.write(data.tobytes())
             self.strand_program["u_mvp"].write(self._mvp(spin).T.tobytes())
+            self.strand_program["u_anchor"].value = (float(anchor[0]), float(anchor[1]))
             self.strand_program["u_tepal_color"].value = c.tepal_color
             self.strand_program["u_stamen_color"].value = c.stamen_color
             self.strand_program["u_bloom"].value = float(params.get("bloom", 0.0))
@@ -237,13 +283,25 @@ class BloomRenderer:
 
         self.ctx.screen.use()
         self.ctx.clear(*c.background, 1.0)
+
+        cam_tex = (
+            self._upload_camera(background) if background is not None else self._empty_tex
+        )
+
         self.scene_tex.use(0)
         self.pong_tex.use(1)
+        cam_tex.use(2)
         self.composite_program["u_scene"].value = 0
         self.composite_program["u_bloom_tex"].value = 1
+        self.composite_program["u_background"].value = 2
         self.composite_program["u_strength"].value = c.bloom_strength
+        self.composite_program["u_has_background"].value = (
+            c.camera_dim if background is not None else 0.0
+        )
         self._composite_vao.render(moderngl.TRIANGLE_STRIP)
 
     def release(self) -> None:
-        for obj in (self.scene_fbo, self.ping_fbo, self.pong_fbo, self._vbo):
+        for obj in (self.scene_fbo, self.ping_fbo, self.pong_fbo, self._vbo, self._empty_tex):
             obj.release()
+        if self._camera_tex is not None:
+            self._camera_tex.release()
