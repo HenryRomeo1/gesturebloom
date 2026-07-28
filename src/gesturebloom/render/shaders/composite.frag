@@ -26,6 +26,12 @@ void main() {
     // The camera background is already dimmed and gamma-correct, so add the
     // flower on top rather than blending -- emissive things add, they do not
     // occlude.
-    vec3 bg = texture(u_background, v_uv).rgb * u_has_background;
+    // Flip v for the camera texture ONLY. numpy arrays have row 0 at the top;
+    // GL texture v=0 is the first row uploaded, and this quad maps v=1 to the top
+    // of the screen -- so without the flip the video renders upside down. The
+    // scene and bloom textures are render targets already in GL orientation and
+    // must NOT be flipped, which is why this happens here per-sampler rather
+    // than in the vertex shader.
+    vec3 bg = texture(u_background, vec2(v_uv.x, 1.0 - v_uv.y)).rgb * u_has_background;
     f_color = vec4(bg + mapped, 1.0);
 }
