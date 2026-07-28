@@ -46,9 +46,17 @@ def cmd_record(args: argparse.Namespace) -> int:
     elapsed = 0.0
 
     try:
-        for lm, hand, dt in source.frames():
+        for observed, dt in source.frames():
             elapsed += dt
-            writer.add(lm, timestamp=elapsed, handedness=hand, label=active)
+            # Recordings are single-hand by format. Take the primary hand so
+            # `record` keeps producing training data the existing pipeline reads.
+            primary = observed[0] if observed else None
+            writer.add(
+                None if primary is None else primary.landmarks,
+                timestamp=elapsed,
+                handedness="Right" if primary is None else primary.handedness,
+                label=active,
+            )
             if len(writer) % 30 == 0:
                 print(f"\r{len(writer)} frames | {elapsed:5.1f}s | label={labels[active]}   ", end="")
             if args.max_frames and len(writer) >= args.max_frames:
@@ -87,9 +95,9 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         print(f"  -> {step.prompt}")
         target = int(step.seconds * fps)
         collected = 0
-        for lm, hand, _dt in frames:
-            if lm is not None:
-                res = try_canonicalize(lm, hand)
+        for observed, _dt in frames:
+            for obs in observed:
+                res = try_canonicalize(obs.landmarks, obs.handedness)
                 if res is not None:
                     canonical, hand_frame = res
                     raw = raw_signals(canonical)
@@ -115,9 +123,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     """Drive the flower from a landmark source."""
     from .control.calibration import CalibrationProfile, default_ranges
-    from .control.mapper import ControlMapper
-    from .landmarks.canonical import try_canonicalize
-    from .landmarks.filters import LandmarkSmoother
+    from .control.dual import DualHandController
     from .landmarks.source import open_source
 
     config: AppConfig = load_config(args.config)
@@ -135,12 +141,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         realtime=args.realtime,
         loop=args.loop,
     )
-    smoother = LandmarkSmoother(
+    controller = DualHandController(
+        ranges=ranges,
         freq=source.nominal_fps,
-        min_cutoff=config.smoothing.min_cutoff,
-        beta=config.smoothing.beta,
+        hold_frames=config.smoothing.hold_frames,
     )
-    mapper = ControlMapper(ranges=ranges, freq=source.nominal_fps)
+    print("Left hand controls grow. Right hand controls bloom. Show both hands.")
 
     if not args.headless:
         # Windowed mode inverts control: the windowing library owns the loop, so
@@ -151,13 +157,14 @@ def cmd_run(args: argparse.Namespace) -> int:
 
             return run_windowed(
                 source=source,
-                smoother=smoother,
-                mapper=mapper,
+                controller=controller,
                 render_config=RenderConfig(
                     width=config.render.width,
                     height=config.render.height,
                     bloom_passes=config.render.bloom_passes,
                     bloom_strength=config.render.bloom_strength,
+                    camera_dim=config.render.camera_dim,
+                    anchor_y_offset=config.render.anchor_y_offset,
                 ),
                 flower_seed=config.flower_seed,
                 record_frames=args.record_frames,
@@ -170,19 +177,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     traces: list[dict] = []
     n = 0
     try:
-        for lm, hand, dt in source.frames():
-            smoothed = smoother.update(lm, dt)
-            if smoothed is None:
-                continue
-            res = try_canonicalize(smoothed, hand)
-            if res is None:
-                continue
-            canonical, hand_frame = res
-            params = mapper.update(canonical, dt=dt, basis=hand_frame.basis)
+        for observed, dt in source.frames():
+            params = controller.update(observed, dt)
             if args.dump_params:
                 traces.append({"frame": n, **{k: round(v, 5) for k, v in params.items()}})
             if args.headless and n % 30 == 0:
-                print(f"\rframe {n:5d} | grow {params['grow']:.3f} | bloom {params['bloom']:.3f}   ", end="")
+                print(
+                    f"\rframe {n:5d} | grow {params.get('grow', 0):.3f} "
+                    f"| bloom {params.get('bloom', 0):.3f}   ",
+                    end="",
+                )
             n += 1
             if args.max_frames and n >= args.max_frames:
                 break

@@ -22,11 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..landmarks.canonical import (
-    INDEX_TIP,
-    THUMB_TIP,
-    WRIST,
-)
+from ..landmarks.canonical import INDEX_TIP, WRIST
 
 #: MediaPipe's 21-landmark skeleton, as index pairs.
 HAND_CONNECTIONS: tuple[tuple[int, int], ...] = (
@@ -113,33 +109,76 @@ def _label(frame: np.ndarray, text: str, xy: tuple[int, int], scale: float = 0.5
     cv2.putText(frame, text, (x, y), font, scale, LABEL_COLOR, 1, cv2.LINE_AA)
 
 
-def draw_param_labels(
+def draw_leader_label(
     frame: np.ndarray,
     landmarks: np.ndarray,
-    params: dict[str, float],
+    text: str,
+    label_pos: tuple[float, float],
+    scale: float = 0.8,
 ) -> np.ndarray:
-    """Float the live control values next to the fingers that drive them.
+    """Draw a label at a fixed screen position, with a leader line to a fingertip.
 
-    This is the single most useful debugging affordance in the project. Seeing
-    ``bloom`` pinned at 0.00 while you pinch tells you instantly whether the
-    problem is tracking, calibration, or mapping -- something a number printed in
-    the terminal cannot do, because you cannot watch your hand and the terminal
-    at the same time.
+    This is the reference composition's key readability trick. Labels pinned to
+    the fingertip jitter constantly and drift off-frame; labels at a fixed
+    position are stable and legible, and the leader line preserves the
+    attribution -- you can still see *which hand* owns the number.
+
+    Parameters
+    ----------
+    label_pos:
+        Fractional position in the frame, ``(0..1, 0..1)``.
     """
+    import cv2
+
     h, w = frame.shape[:2]
+    tip = (int(landmarks[INDEX_TIP, 0] * w), int(landmarks[INDEX_TIP, 1] * h))
+    lx, ly = int(label_pos[0] * w), int(label_pos[1] * h)
 
-    def at(idx: int, dx: int = 14, dy: int = -8) -> tuple[int, int]:
-        return (
-            int(np.clip(landmarks[idx, 0] * w + dx, 4, w - 130)),
-            int(np.clip(landmarks[idx, 1] * h + dy, 18, h - 8)),
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (tw, th), _ = cv2.getTextSize(text, font, scale, 2)
+    # Anchor the leader to whichever side of the text faces the hand, so the line
+    # never crosses over the glyphs.
+    anchor_x = lx - 10 if tip[0] < lx else lx + tw + 10
+    anchor = (anchor_x, ly - th // 2)
+
+    cv2.line(frame, anchor, tip, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.circle(frame, tip, 5, (255, 255, 255), -1, cv2.LINE_AA)
+
+    cv2.putText(frame, text, (lx, ly), font, scale, LABEL_SHADOW, 5, cv2.LINE_AA)
+    cv2.putText(frame, text, (lx, ly), font, scale, LABEL_COLOR, 2, cv2.LINE_AA)
+    return frame
+
+
+def draw_dual_hands(
+    frame: np.ndarray,
+    controller,
+    label_positions: dict[str, tuple[float, float]] | None = None,
+) -> np.ndarray:
+    """Draw both hands' skeletons plus a leader-labelled value for each.
+
+    Reads directly off a
+    :class:`~gesturebloom.control.dual.DualHandController` so the overlay always
+    shows exactly which hand the controller believes it is tracking. If the
+    labels look swapped, the mirroring is wrong -- and that is visible instantly
+    here, rather than as a confusing inversion of the controls.
+    """
+    positions = label_positions or {"grow": (0.30, 0.46), "bloom": (0.62, 0.46)}
+
+    for handedness in ("Left", "Right"):
+        landmarks = controller.landmarks(handedness)
+        if landmarks is None:
+            continue
+        draw_skeleton(frame, landmarks)
+        parameter = controller.parameter_for(handedness)
+        if parameter is None or parameter not in controller.params:
+            continue
+        value = controller.params[parameter]
+        draw_leader_label(
+            frame,
+            landmarks,
+            f"{parameter} {value:.2f}",
+            positions.get(parameter, (0.45, 0.46)),
         )
-
-    # grow is driven by openness (whole hand), bloom by pinch aperture --
-    # so anchor each label to the anatomy responsible for it.
-    if "grow" in params:
-        _label(frame, f"grow {params['grow']:.2f}", at(INDEX_TIP))
-    if "bloom" in params:
-        _label(frame, f"bloom {params['bloom']:.2f}", at(THUMB_TIP, dx=14, dy=18))
     return frame
 
 
@@ -149,6 +188,7 @@ def draw_hud(
     fps: float | None = None,
     tracking: bool = True,
     backend: str = "",
+    hands: dict[str, bool] | None = None,
 ) -> np.ndarray:
     """Corner HUD: bars for each parameter, plus fps and tracking state.
 
@@ -162,8 +202,15 @@ def draw_hud(
     x0, y0 = 14, 26
     bar_w, bar_h, gap = 150, 10, 24
 
+    if hands is not None:
+        # Per-hand tracking state, because "which hand am I missing" is the first
+        # question when a parameter stops responding.
+        parts = [f"{k[0]}:{'ok' if v else '--'}" for k, v in sorted(hands.items())]
+        _label(frame, "hands  " + "  ".join(parts), (x0, y0), scale=0.5)
+        y0 += gap
+
     if not tracking:
-        _label(frame, "no hand detected", (x0, y0), scale=0.6)
+        _label(frame, "show both hands", (x0, y0), scale=0.6)
         return frame
 
     for i, (name, value) in enumerate(sorted(params.items())):
@@ -184,6 +231,38 @@ def draw_hud(
         _label(frame, "  ".join(footer), (x0, h - 14), scale=0.45)
 
     return frame
+
+
+def midpoint_anchor_ndc(
+    landmarks_a: np.ndarray | None,
+    landmarks_b: np.ndarray | None,
+    y_offset: float = 0.0,
+    fallback: tuple[float, float] = (0.0, 0.0),
+) -> tuple[float, float]:
+    """Anchor the plant between two hands, falling back gracefully.
+
+    With both hands present the plant sits between them, which is what makes it
+    read as something the two hands are jointly holding. With one hand it tracks
+    that hand; with none it holds centre rather than snapping to a corner.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> a = np.zeros((21, 3)); a[0] = [0.25, 0.5, 0]
+    >>> b = np.zeros((21, 3)); b[0] = [0.75, 0.5, 0]
+    >>> midpoint_anchor_ndc(a, b)
+    (0.0, 0.0)
+    >>> midpoint_anchor_ndc(a, None)
+    (-0.5, 0.0)
+    >>> midpoint_anchor_ndc(None, None)
+    (0.0, 0.0)
+    """
+    present = [lm for lm in (landmarks_a, landmarks_b) if lm is not None]
+    if not present:
+        return fallback
+    xs = float(np.mean([lm[WRIST, 0] for lm in present]))
+    ys = float(np.mean([lm[WRIST, 1] for lm in present]))
+    return (xs * 2.0 - 1.0, (1.0 - ys) * 2.0 - 1.0 + y_offset)
 
 
 def wrist_anchor_ndc(landmarks: np.ndarray, y_offset: float = 0.0) -> tuple[float, float]:

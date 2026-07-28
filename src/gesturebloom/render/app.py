@@ -25,8 +25,7 @@ import numpy as np
 
 def run_windowed(
     source,
-    smoother,
-    mapper,
+    controller,
     render_config,
     flower_seed: int = 7,
     record_frames: Path | None = None,
@@ -40,10 +39,9 @@ def run_windowed(
     source:
         Any :class:`~gesturebloom.landmarks.source.LandmarkSource` -- webcam or
         replay. The window does not know or care which.
-    smoother:
-        A :class:`~gesturebloom.landmarks.filters.LandmarkSmoother`.
-    mapper:
-        A :class:`~gesturebloom.control.mapper.ControlMapper`.
+    controller:
+        A :class:`~gesturebloom.control.dual.DualHandController`, which owns all
+        per-hand filtering and the hand-to-parameter assignment.
     render_config:
         A :class:`~gesturebloom.render.window.RenderConfig`.
     record_frames:
@@ -70,9 +68,8 @@ def run_windowed(
             "Install with: pip install 'gesturebloom[render]'"
         ) from exc
 
-    from ..geometry.spiderlily import build_spiderlily
-    from ..landmarks.canonical import try_canonicalize
-    from .overlay import draw_hud, draw_param_labels, draw_skeleton, wrist_anchor_ndc
+    from ..geometry.plant import build_plant
+    from .overlay import draw_dual_hands, draw_hud, midpoint_anchor_ndc
     from .window import BloomRenderer
 
     if record_frames is not None:
@@ -100,11 +97,6 @@ def run_windowed(
             self.finished = False
             self.show_camera = True
             self.show_skeleton = True
-            # Raw (pre-canonical) landmarks, kept for drawing. Canonical
-            # coordinates have position and scale removed by design, so they
-            # cannot be drawn back onto the image.
-            self.raw_landmarks = None
-            self.tracking = False
             self.anchor = (0.0, 0.0)
             self.smoothed_fps = 0.0
             print(
@@ -115,7 +107,7 @@ def run_windowed(
         # ---- frame pump ---------------------------------------------------- #
         def _pull(self) -> None:
             try:
-                lm, hand, dt = next(self.frames)
+                observed, dt = next(self.frames)
             except StopIteration:
                 self.finished = True
                 return
@@ -127,22 +119,16 @@ def run_windowed(
                     0.9 * self.smoothed_fps + 0.1 * inst
                 )
 
-            smoothed = smoother.update(lm, dt)
-            if smoothed is None:
-                self.tracking = False
-                self.raw_landmarks = None
-                return
-            result = try_canonicalize(smoothed, hand)
-            if result is None:
-                self.tracking = False
-                return
-            canonical, hand_frame = result
-            self.n_tracked += 1
-            self.tracking = True
-            # Smoothed but still image-space -- exactly what the overlay needs.
-            self.raw_landmarks = smoothed
-            self.params = mapper.update(canonical, dt=dt, basis=hand_frame.basis)
-            self.anchor = wrist_anchor_ndc(smoothed, y_offset=render_config.anchor_y_offset)
+            self.params = controller.update(observed, dt)
+            if controller.any_tracked:
+                self.n_tracked += 1
+            # Anchor between the two hands, so the plant reads as something they
+            # are jointly holding up.
+            self.anchor = midpoint_anchor_ndc(
+                controller.landmarks("Left"),
+                controller.landmarks("Right"),
+                y_offset=render_config.anchor_y_offset,
+            )
 
         # ---- render callback ----------------------------------------------- #
         def _compose_background(self):
@@ -152,15 +138,18 @@ def run_windowed(
                 return None
             # Copy: the source owns that buffer and reuses it next frame.
             annotated = frame.copy()
-            if self.show_skeleton and self.raw_landmarks is not None:
-                draw_skeleton(annotated, self.raw_landmarks)
-                draw_param_labels(annotated, self.raw_landmarks, self.params)
+            if self.show_skeleton:
+                draw_dual_hands(annotated, controller)
             draw_hud(
                 annotated,
                 self.params,
                 fps=self.smoothed_fps,
-                tracking=self.tracking,
+                tracking=controller.any_tracked,
                 backend=getattr(source, "backend_name", ""),
+                hands={
+                    "Left": controller.tracked("Left"),
+                    "Right": controller.tracked("Right"),
+                },
             )
             return annotated
 
@@ -168,14 +157,15 @@ def run_windowed(
             if not self.paused:
                 self._pull()
 
-            strands = build_spiderlily(
-                self.params["grow"], self.params["bloom"], seed=flower_seed
+            strands = build_plant(
+                self.params.get("grow", 0.0),
+                self.params.get("bloom", 0.0),
+                seed=flower_seed,
             )
-            # sway maps [0,1] -> a gentle +/- 0.6 rad orbit
             self.renderer.draw(
                 strands,
                 self.params,
-                spin=self.params.get("sway", 0.5) * 1.2 - 0.6,
+                spin=0.0,
                 background=self._compose_background(),
                 anchor=self.anchor if self.show_camera else (0.0, 0.0),
             )
@@ -212,8 +202,7 @@ def run_windowed(
                 self.paused = not self.paused
                 print(f"{'paused' if self.paused else 'resumed'}")
             elif key == keys.R:
-                smoother.reset()
-                mapper.reset()
+                controller.reset()
                 print("filters reset")
             elif key == keys.C:
                 self.show_camera = not self.show_camera
@@ -300,10 +289,10 @@ def probe_gl() -> int:
             return 1
 
     # Exercise the numpy->GL seam once with real flower data.
-    from ..geometry.spiderlily import build_spiderlily
+    from ..geometry.plant import build_plant
     from .window import build_batch
 
-    data, counts = build_batch(build_spiderlily(1.0, 0.7))
+    data, counts = build_batch(build_plant(1.0, 0.7))
     print(f"vertex batch: {data.shape[0]} verts across {len(counts)} strands")
     assert np.all(np.isfinite(data))
     print("\nGL setup looks good.")

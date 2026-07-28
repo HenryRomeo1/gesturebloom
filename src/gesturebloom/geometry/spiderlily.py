@@ -245,6 +245,37 @@ def build_spiderlily(
     return strands
 
 
+def transform_strand(
+    strand: Strand,
+    scale: float = 1.0,
+    offset: np.ndarray | None = None,
+) -> Strand:
+    """Uniformly scale a strand and translate it. Returns a new Strand.
+
+    Widths scale with the geometry -- otherwise a flower scaled to a third of its
+    size keeps full-thickness tepals and reads as a fat, stubby blob rather than a
+    small flower.
+
+    Examples
+    --------
+    >>> s = build_spiderlily(1.0, 1.0, seed=0)[0]
+    >>> t = transform_strand(s, scale=0.5, offset=np.array([1.0, 2.0, 0.0], dtype=np.float32))
+    >>> bool(np.allclose(t.points[0], s.points[0] * 0.5 + [1.0, 2.0, 0.0]))
+    True
+    >>> bool(np.allclose(t.widths, s.widths * 0.5))
+    True
+    """
+    pts = strand.points * float(scale)
+    if offset is not None:
+        pts = pts + np.asarray(offset, dtype=np.float32)
+    return Strand(
+        points=pts.astype(np.float32),
+        widths=(strand.widths * float(scale)).astype(np.float32),
+        role=strand.role,
+        index=strand.index,
+    )
+
+
 def ribbonize(
     strand: Strand,
     view_dir: np.ndarray | None = None,

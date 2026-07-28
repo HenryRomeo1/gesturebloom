@@ -18,6 +18,8 @@ render:
   bloom_passes: 2       # Each pass widens the glow; 2 is plenty at 720p.
   bloom_strength: 0.85
   vsync: true
+  camera_dim: 0.62      # Camera feed brightness. Above ~0.7 the plant stops reading.
+  anchor_y_offset: -0.30  # Pushes the plant below the hands so it grows upward.
 
 spotter:
   # Do NOT tune these against a live webcam. Record a trace once, then use

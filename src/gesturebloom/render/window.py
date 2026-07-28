@@ -41,12 +41,15 @@ class RenderConfig:
     background: tuple[float, float, float] = (0.02, 0.01, 0.04)
     tepal_color: tuple[float, float, float] = (0.96, 0.14, 0.22)
     stamen_color: tuple[float, float, float] = (1.0, 0.82, 0.35)
-    camera_distance: float = 3.4
-    fov_degrees: float = 42.0
+    stem_color: tuple[float, float, float] = (0.30, 0.95, 0.36)
+    """Green stem, matching the reference composition. Roles map to colours here
+    so the geometry modules never need to know anything about appearance."""
+    camera_distance: float = 3.9
+    fov_degrees: float = 46.0
     camera_dim: float = 0.62
     """How much to dim the camera feed. Below ~0.7 the flower reads clearly on
     top; at 1.0 it competes with a bright, busy video background and loses."""
-    anchor_y_offset: float = -0.18
+    anchor_y_offset: float = -0.30
     """Pushes the flower slightly below the wrist so it appears to grow *out of*
     the hand rather than through it."""
 
@@ -74,43 +77,70 @@ def _look_at(eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> np.ndarray:
     return m
 
 
+#: Role -> RGB. Kept as a module constant so :func:`build_batch` stays pure and
+#: testable without constructing a GL context or a RenderConfig.
+DEFAULT_ROLE_COLORS: dict[str, tuple[float, float, float]] = {
+    "tepal": (0.96, 0.14, 0.22),
+    "stamen": (1.0, 0.82, 0.35),
+    "stem": (0.30, 0.95, 0.36),
+}
+
+
 def build_batch(
     strands: list[Strand],
     view_dir: np.ndarray | None = None,
+    role_colors: dict[str, tuple[float, float, float]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Pack all strands into one interleaved vertex buffer with primitive restarts.
+    """Pack all strands into one interleaved vertex buffer.
+
+    Colour is a **per-vertex attribute** rather than a role index plus shader
+    branching. Three roles already made the old ``mix(a, b, role)`` trick
+    untenable, and per-vertex colour scales to any number of roles with no shader
+    change at all -- the geometry modules stay ignorant of appearance, and the
+    fragment shader stops containing a palette.
 
     Returns
     -------
     vertex_data:
-        ``(N, 6)`` float32: ``x, y, z, u, v, role`` where ``role`` is 0 for tepal
-        and 1 for stamen -- passed as a vertex attribute so a single draw call
-        handles both, with the fragment shader picking the colour.
+        ``(N, 8)`` float32: ``x, y, z, u, v, r, g, b``.
     counts:
-        ``(n_strands,)`` int32 vertex count per strand, for
-        ``glMultiDrawArrays``-style batched triangle-strip drawing.
+        ``(n_strands,)`` int32 vertex count per strand, for batched
+        triangle-strip drawing.
 
     Examples
     --------
     >>> from gesturebloom.geometry.spiderlily import build_spiderlily
     >>> data, counts = build_batch(build_spiderlily(1.0, 0.7))
     >>> data.shape[1], len(counts)
-    (6, 12)
+    (8, 12)
     >>> int(counts.sum()) == data.shape[0]
+    True
+
+    Stems come out green, tepals red:
+
+    >>> from gesturebloom.geometry.plant import build_plant
+    >>> data, _ = build_batch(build_plant(1.0, 1.0))
+    >>> greens = data[data[:, 6] > 0.9]        # high G channel
+    >>> bool(len(greens) > 0)
     True
     """
     vd = np.array([0.0, 0.0, 1.0], dtype=np.float32) if view_dir is None else view_dir
+    palette = role_colors or DEFAULT_ROLE_COLORS
+    fallback = (1.0, 1.0, 1.0)
+
     chunks: list[np.ndarray] = []
     counts: list[int] = []
     for s in strands:
         verts, uvs = ribbonize(s, vd)
         if verts.shape[0] == 0:
             continue
-        role = np.full((verts.shape[0], 1), 1.0 if s.role == "stamen" else 0.0, dtype=np.float32)
-        chunks.append(np.hstack([verts, uvs, role]).astype(np.float32))
+        rgb = np.tile(
+            np.array(palette.get(s.role, fallback), dtype=np.float32), (verts.shape[0], 1)
+        )
+        chunks.append(np.hstack([verts, uvs, rgb]).astype(np.float32))
         counts.append(verts.shape[0])
     if not chunks:
-        return np.zeros((0, 6), dtype=np.float32), np.zeros(0, dtype=np.int32)
+        return np.zeros((0, 8), dtype=np.float32), np.zeros(0, dtype=np.int32)
     return np.vstack(chunks), np.array(counts, dtype=np.int32)
 
 
@@ -150,16 +180,15 @@ class BloomRenderer:
         self.strand_program = self._load_program("strand")
         self.blur_program = self._load_program("blur")
         self.composite_program = self._load_program("composite")
-        self.background_program = self._load_program("background")
         self._camera_tex = None
         # 1x1 black stand-in, bound when there is no camera frame. Sampling an
         # unbound texture unit is undefined behaviour and shows up as garbage or
         # a driver crash, so always bind something valid.
         self._empty_tex = self.ctx.texture((1, 1), 3, data=b"\x00\x00\x00")
 
-        self._vbo = self.ctx.buffer(reserve=4 * 6 * 8192, dynamic=True)
+        self._vbo = self.ctx.buffer(reserve=4 * 8 * 32768, dynamic=True)
         self._vao = self.ctx.vertex_array(
-            self.strand_program, [(self._vbo, "3f 2f 1f", "in_position", "in_uv", "in_role")]
+            self.strand_program, [(self._vbo, "3f 2f 3f", "in_position", "in_uv", "in_color")]
         )
         self._make_targets()
         self._quad = self._make_fullscreen_quad()
@@ -168,9 +197,6 @@ class BloomRenderer:
         # which is a miserable bug to track down after the fact.
         self._composite_vao = self.ctx.vertex_array(
             self.composite_program, [(self._quad[1], "2f 2f", "in_position", "in_uv")]
-        )
-        self._background_vao = self.ctx.vertex_array(
-            self.background_program, [(self._quad[1], "2f 2f", "in_position", "in_uv")]
         )
 
     def _load_program(self, name: str):
@@ -242,8 +268,15 @@ class BloomRenderer:
         """
         import moderngl
 
-        data, counts = build_batch(strands)
         c = self.config
+        data, counts = build_batch(
+            strands,
+            role_colors={
+                "tepal": c.tepal_color,
+                "stamen": c.stamen_color,
+                "stem": c.stem_color,
+            },
+        )
 
         # Flower renders into a TRANSPARENT buffer. This is the important part:
         # if the camera feed were in this buffer, the bloom bright-pass would
@@ -257,8 +290,6 @@ class BloomRenderer:
             self._vbo.write(data.tobytes())
             self.strand_program["u_mvp"].write(self._mvp(spin).T.tobytes())
             self.strand_program["u_anchor"].value = (float(anchor[0]), float(anchor[1]))
-            self.strand_program["u_tepal_color"].value = c.tepal_color
-            self.strand_program["u_stamen_color"].value = c.stamen_color
             self.strand_program["u_bloom"].value = float(params.get("bloom", 0.0))
             offset = 0
             for n in counts.tolist():

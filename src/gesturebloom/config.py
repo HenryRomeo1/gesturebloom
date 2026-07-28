@@ -36,6 +36,8 @@ class RenderSettings:
     bloom_passes: int = 2
     bloom_strength: float = 0.85
     vsync: bool = True
+    camera_dim: float = 0.62
+    anchor_y_offset: float = -0.30
 
 
 @dataclass

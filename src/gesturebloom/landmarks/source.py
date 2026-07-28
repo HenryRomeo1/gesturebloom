@@ -38,7 +38,27 @@ import numpy as np
 
 from ..data.recording import Recording, replay
 
-Frame = tuple[np.ndarray | None, str, float]
+
+@dataclass(frozen=True)
+class HandObservation:
+    """One detected hand in one frame.
+
+    Introduced when two-handed control became a first-class feature. The earlier
+    ``(landmarks, handedness, dt)`` tuple could only ever describe one hand, and
+    growing it into a longer tuple would have made every call site positional and
+    unreadable.
+    """
+
+    landmarks: np.ndarray
+    """``(21, 3)`` in image-normalized coordinates -- raw MediaPipe output."""
+    handedness: str
+    """``"Left"`` or ``"Right"``, already corrected for mirroring."""
+    score: float = 1.0
+
+
+#: ``(observations, dt)``. The list is empty when no hand is detected -- an empty
+#: list rather than ``None``, so consumers can iterate unconditionally.
+Frame = tuple[list["HandObservation"], float]
 
 #: Google's published float16 hand landmarker bundle for the Tasks API.
 HAND_LANDMARKER_URL = (
@@ -125,7 +145,9 @@ class ReplaySource:
 
     def frames(self) -> Iterator[Frame]:
         while True:
-            yield from replay(self.recording, realtime=self.realtime)
+            for lm, hand, dt in replay(self.recording, realtime=self.realtime):
+                obs = [] if lm is None else [HandObservation(landmarks=lm, handedness=hand)]
+                yield obs, dt
             if not self.loop:
                 return
 
@@ -151,7 +173,7 @@ class _HandBackend(Protocol):
 
     name: str
 
-    def process(self, rgb: np.ndarray, timestamp_ms: int) -> tuple[np.ndarray | None, str]: ...
+    def process(self, rgb: np.ndarray, timestamp_ms: int) -> list[HandObservation]: ...
     def close(self) -> None: ...
 
 
@@ -190,7 +212,7 @@ class _TasksBackend:
         self._detector = vision.HandLandmarker.create_from_options(options)
         self._last_ts = -1
 
-    def process(self, rgb: np.ndarray, timestamp_ms: int) -> tuple[np.ndarray | None, str]:
+    def process(self, rgb: np.ndarray, timestamp_ms: int) -> list[HandObservation]:
         # VIDEO mode rejects non-increasing timestamps with an opaque error, so
         # enforce monotonicity here rather than trusting wall-clock arithmetic.
         if timestamp_ms <= self._last_ts:
@@ -203,16 +225,16 @@ class _TasksBackend:
         )
         result = self._detector.detect_for_video(image, timestamp_ms)
 
-        if not result.hand_landmarks:
-            return None, "Right"
-
-        landmarks = result.hand_landmarks[0]
-        label = "Right"
-        if result.handedness and result.handedness[0]:
-            label = result.handedness[0][0].category_name
-
-        lm = np.array([[p.x, p.y, p.z] for p in landmarks], dtype=np.float64)
-        return lm, label
+        out: list[HandObservation] = []
+        for i, landmarks in enumerate(result.hand_landmarks or []):
+            label, score = "Right", 1.0
+            if result.handedness and i < len(result.handedness) and result.handedness[i]:
+                cat = result.handedness[i][0]
+                label = cat.category_name
+                score = float(getattr(cat, "score", 1.0))
+            lm = np.array([[p.x, p.y, p.z] for p in landmarks], dtype=np.float64)
+            out.append(HandObservation(landmarks=lm, handedness=label, score=score))
+        return out
 
     def close(self) -> None:
         self._detector.close()
@@ -242,18 +264,16 @@ class _LegacyBackend:
             min_tracking_confidence=min_tracking_confidence,
         )
 
-    def process(self, rgb: np.ndarray, timestamp_ms: int) -> tuple[np.ndarray | None, str]:
+    def process(self, rgb: np.ndarray, timestamp_ms: int) -> list[HandObservation]:
         result = self._hands.process(rgb)
-        if not result.multi_hand_landmarks:
-            return None, "Right"
-
-        hand = result.multi_hand_landmarks[0]
-        label = "Right"
-        if result.multi_handedness:
-            label = result.multi_handedness[0].classification[0].label
-
-        lm = np.array([[p.x, p.y, p.z] for p in hand.landmark], dtype=np.float64)
-        return lm, label
+        out: list[HandObservation] = []
+        for i, hand in enumerate(result.multi_hand_landmarks or []):
+            label = "Right"
+            if result.multi_handedness and i < len(result.multi_handedness):
+                label = result.multi_handedness[i].classification[0].label
+            lm = np.array([[p.x, p.y, p.z] for p in hand.landmark], dtype=np.float64)
+            out.append(HandObservation(landmarks=lm, handedness=label))
+        return out
 
     def close(self) -> None:
         self._hands.close()
@@ -322,7 +342,7 @@ class WebcamSource:
         width: int = 1280,
         height: int = 720,
         target_fps: int = 60,
-        num_hands: int = 1,
+        num_hands: int = 2,
         min_detection_confidence: float = 0.6,
         min_tracking_confidence: float = 0.6,
         mirror: bool = True,
@@ -385,20 +405,24 @@ class WebcamSource:
             self._last_frame = rgb
 
             now = time.perf_counter()
-            lm, label = self._backend.process(rgb, int((now - start) * 1000.0))
+            observed = self._backend.process(rgb, int((now - start) * 1000.0))
             dt = now - last
             last = now
 
-            if lm is None:
-                yield None, "Right", dt
-                continue
-
             # MediaPipe labels handedness for the *un-mirrored* image, so a
-            # mirrored preview reverses it. Getting this wrong silently halves
-            # your effective dataset by mislabeling chirality.
+            # mirrored preview reverses it. Getting this wrong silently swaps
+            # which hand drives which parameter, and swaps chirality labels in
+            # any data you record.
             if self.mirror:
-                label = "Left" if label == "Right" else "Right"
-            yield lm, label, dt
+                observed = [
+                    HandObservation(
+                        landmarks=o.landmarks,
+                        handedness="Left" if o.handedness == "Right" else "Right",
+                        score=o.score,
+                    )
+                    for o in observed
+                ]
+            yield observed, dt
 
     def close(self) -> None:
         self._cap.release()
