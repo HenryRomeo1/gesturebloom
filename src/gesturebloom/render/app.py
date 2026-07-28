@@ -211,11 +211,19 @@ def probe_gl() -> int:
         print("  - very old integrated GPU without GL 3.3 support")
         return 1
 
-    print(f"GL version : {ctx.info['GL_VERSION']}")
-    print(f"Renderer   : {ctx.info['GL_RENDERER']}")
-    print(f"Vendor     : {ctx.info['GL_VENDOR']}")
-    print(f"GLSL       : {ctx.info['GL_SHADING_LANGUAGE_VERSION']}")
-    print(f"Max texture: {ctx.info['GL_MAX_TEXTURE_SIZE']}")
+    # ctx.info contents vary by driver. Apple's Metal-backed GL, for instance,
+    # omits GL_SHADING_LANGUAGE_VERSION. Never index this dict directly -- a
+    # diagnostic tool that crashes while reporting diagnostics is worse than useless.
+    info = ctx.info
+
+    def field(key: str) -> str:
+        return str(info.get(key, "(not reported by this driver)"))
+
+    print(f"GL version : {field('GL_VERSION')}")
+    print(f"Renderer   : {field('GL_RENDERER')}")
+    print(f"Vendor     : {field('GL_VENDOR')}")
+    print(f"GLSL       : {field('GL_SHADING_LANGUAGE_VERSION')}")
+    print(f"Max texture: {field('GL_MAX_TEXTURE_SIZE')}")
 
     # Compile the real shaders. Driver-specific GLSL rejections are common and
     # this is where you want to find out, not inside the render loop.
