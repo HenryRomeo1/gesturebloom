@@ -10,10 +10,10 @@ gesture *events* rather than just classifying frames.
 
 ![Spiderlily bloom progression, grow and bloom from 0 to 1](assets/geometry_preview.svg)
 
-*Parametric geometry across the bloom range, rendered straight from
-`geometry/spiderlily.py` — regenerate with `make preview`. Note that the tepal
-tips recurve below the receptacle at full bloom, and that arc length is constant
-across all five stages.*
+*The branching plant across the grow/bloom range, rendered straight from
+`geometry/plant.py` — regenerate with `make preview`. Note the sequencing: the
+stem completes before any flower appears, so a low `grow` reads as a young shoot
+rather than a shrunken bouquet.*
 
 <!-- TODO: add the live capture GIF above this line once the GL renderer is running:
      gesturebloom run --record-frames /tmp/frames --max-frames 480
@@ -40,8 +40,8 @@ separate here because they're different problems:
 
 | Layer | Problem | Approach |
 |---|---|---|
-| **Geometry** | Turn two scalars into a flower that looks alive | Arc-length integration of a curving unit tangent |
-| **Control** | Turn a hand into two scalars, robustly, for *any* hand | Analytic canonicalization + per-user calibration + adaptive filtering |
+| **Geometry** | Turn two scalars into a plant that looks alive | Arc-length integration of a curving unit tangent |
+| **Control** | Turn two hands into two independent scalars, robustly, for *any* hands | Analytic canonicalization + per-user calibration + adaptive filtering |
 | **Recognition** | Detect that a gesture *happened*, low-latency, in an unsegmented stream | Causal dilated TCN + hysteresis state machine |
 
 The recognition layer is the machine learning. The control layer is where most of
@@ -191,14 +191,45 @@ def test_signals_actually_vary():
     assert values.std() > 0.02
 ```
 
+## Two-handed control
+
+One hand cannot comfortably drive two independent continuous parameters. Every
+single-hand scheme has to overload one gesture — openness for one axis, pinch for
+the other — and the two interfere, because opening your hand changes your pinch
+aperture whether you meant it to or not.
+
+So the axes split across hands:
+
+| Hand | Parameter | Effect |
+|---|---|---|
+| Left | `grow` | Extends the stem, then scales the flowers in |
+| Right | `bloom` | Opens the flowers via tepal curvature |
+
+Three behaviours in `control/dual.py` are UX contracts, each with a test:
+
+- **Each hand has its own filter state.** A shared One Euro filter would read the
+  difference between two unrelated hands as enormous velocity and smear one
+  hand's motion into the other's value.
+- **A missing hand holds its value.** Reset-to-zero is the obvious
+  implementation and it is badly wrong — reaching off-screen would collapse the
+  plant and re-grow it. Holding means you can set `grow`, drop that hand, and
+  adjust `bloom` with the other.
+- **Duplicate handedness prefers the higher score**, because two detections
+  labelled the same hand usually means one is spurious.
+
+Handedness is mirror-corrected in `WebcamSource`, so "left hand" means *your*
+left hand as you see it in the mirrored preview. Get this wrong and the controls
+silently swap — which is why the overlay reads its labels directly off the
+controller, making a mirroring bug visible instantly.
+
 ## What you see on screen
 
 The window composites three layers, and the split is deliberate:
 
 | Layer | Drawn by | Space |
 |---|---|---|
-| Camera feed + hand skeleton + parameter labels | OpenCV, into the numpy frame | image |
-| Flower ribbons | GLSL, into a transparent buffer | scene |
+| Camera feed + both skeletons + leader-line labels | OpenCV, into the numpy frame | image |
+| Stem and flower ribbons | GLSL, into a transparent buffer | scene |
 | Bloom glow | separable Gaussian on a half-res bright pass | screen |
 
 The flower renders into a **transparent** buffer rather than over the camera
@@ -207,10 +238,16 @@ smear it. Camera and flower only meet in the final composite, where the flower i
 added emissively over a dimmed camera background — so the flower glows and the
 video stays sharp.
 
-The flower is anchored to your wrist in screen space (offset applied after
-projection and scaled by `w`, so it stays the same size wherever your hand is),
-which makes it read as growing out of your palm rather than floating in front of
-you.
+The plant is anchored at the **midpoint between your two hands** in screen space
+(offset applied after projection and scaled by `w`, so it stays the same size
+wherever your hands are), which makes it read as something the two hands are
+jointly holding up. With one hand it tracks that hand; with none it holds centre
+rather than snapping to a corner.
+
+Labels sit at fixed screen positions with white leader lines to each index
+fingertip. Labels pinned directly to a fingertip jitter constantly and drift
+off-frame; a fixed position is stable and legible, and the leader line preserves
+the attribution.
 
 Live keys: `ESC`/`Q` quit, `SPACE` pause, `R` reset filters, `S` screenshot,
 `C` toggle camera feed, `K` toggle skeleton.
@@ -314,9 +351,9 @@ the reasoning behind each dependency being optional.
 ```
 src/gesturebloom/
 ├── landmarks/     canonicalization, One Euro filtering, capture sources
-├── control/       raw signal extraction, calibration, parameter mapping  ← shared
+├── control/       signal extraction, calibration, dual-hand control  ← shared
 ├── models/        pose MLP, causal TCN, onset spotter, ONNX export
-├── geometry/      parametric spiderlily
+├── geometry/      parametric spiderlily + branching plant
 ├── render/        moderngl renderer + GLSL (bloom, tone mapping)
 ├── data/          recording format, replay, windowed datasets
 └── bench/         per-stage latency instrumentation
@@ -328,8 +365,6 @@ different render parameters without touching this code.
 
 ## Roadmap
 
-- Two-handed interaction — the control abstraction supports it; capture defaults
-  to one hand because tracking two roughly doubles the dominant latency stage
 - `ribbonize` in a geometry shader, to fix the bottleneck the benchmark exposes
 - Gesture-triggered discrete events (spotter → petal burst) wired to the render
 - TouchDesigner integration as a thin OSC layer under `integrations/`, keeping

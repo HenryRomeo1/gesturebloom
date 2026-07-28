@@ -21,13 +21,16 @@ from pathlib import Path
 
 import numpy as np
 
-from gesturebloom.geometry.spiderlily import SpiderlilyParams, build_spiderlily, ribbonize
+from gesturebloom.geometry.plant import build_plant
+from gesturebloom.geometry.spiderlily import ribbonize
 
 # Matches the shader palette in render/shaders/strand.frag
 TEPAL = "#f5243a"
 TEPAL_TIP = "#ff9c8a"
 STAMEN = "#ffd15a"
+STEM = "#4df25c"
 BACKGROUND = "#07040d"
+ROLE_FILL = {"tepal": TEPAL, "stamen": STAMEN, "stem": STEM}
 
 
 def project(points: np.ndarray, tilt: float = 0.42) -> tuple[np.ndarray, np.ndarray]:
@@ -57,9 +60,8 @@ def strand_polygon(strand, scale: float, cx: float, cy: float) -> str:
 
 
 def render_flower(grow: float, bloom: float, cx: float, cy: float, scale: float, seed: int) -> list[str]:
-    """Emit SVG elements for one flower, depth-sorted back to front."""
-    params = SpiderlilyParams()
-    strands = build_spiderlily(grow, bloom, params=params, seed=seed)
+    """Emit SVG elements for the whole plant, depth-sorted back to front."""
+    strands = build_plant(grow, bloom, seed=seed)
 
     ordered = []
     for strand in strands:
@@ -72,9 +74,9 @@ def render_flower(grow: float, bloom: float, cx: float, cy: float, scale: float,
         pts = strand_polygon(strand, scale, cx, cy)
         if not pts:
             continue
-        if strand.role == "stamen":
-            fill, opacity = STAMEN, 0.95
-        else:
+        fill = ROLE_FILL.get(strand.role, TEPAL)
+        opacity = 0.95
+        if strand.role == "tepal":
             # Rear tepals sit slightly darker, which reads as depth without
             # needing real lighting.
             fill = TEPAL_TIP if mean_depth > 0 else TEPAL
@@ -87,22 +89,22 @@ def render_flower(grow: float, bloom: float, cx: float, cy: float, scale: float,
     return out
 
 
-def build_svg(stages: int = 5, seed: int = 7, panel_w: int = 190, panel_h: int = 250) -> str:
+def build_svg(stages: int = 5, seed: int = 7, panel_w: int = 210, panel_h: int = 290) -> str:
     width = panel_w * stages
-    scale = panel_w * 0.42
+    scale = panel_w * 0.24
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {panel_h}" '
         f'width="{width}" height="{panel_h}" role="img" '
-        f'aria-label="Spiderlily bloom progression from closed to fully open">',
+        f'aria-label="Branching spiderlily plant, grow and bloom from 0 to 1">',
         f'  <rect width="{width}" height="{panel_h}" fill="{BACKGROUND}"/>',
     ]
 
     for i in range(stages):
         t = i / max(stages - 1, 1)
-        grow = 0.45 + 0.55 * t
+        grow = 0.25 + 0.75 * t
         bloom = t
         cx = panel_w * (i + 0.5)
-        cy = panel_h * 0.68
+        cy = panel_h * 0.80
         parts.append(f'  <g id="stage-{i}">')
         parts.extend(render_flower(grow, bloom, cx, cy, scale, seed))
         parts.append(

@@ -97,9 +97,11 @@ def test_ribbon_does_not_pinch_when_tangent_faces_camera() -> None:
 
 def test_build_batch_packing() -> None:
     data, counts = build_batch(build_spiderlily(1.0, 0.5, seed=0))
-    assert data.shape[1] == 6  # x,y,z,u,v,role
+    assert data.shape[1] == 8  # x,y,z,u,v,r,g,b
     assert int(counts.sum()) == data.shape[0]
-    assert set(np.unique(data[:, 5]).tolist()) == {0.0, 1.0}
+    assert np.all(np.isfinite(data))
+    # A lone flower has two roles, hence two distinct colours.
+    assert len(np.unique(data[:, 5:8], axis=0)) == 2
 
 
 def test_zero_growth_degenerate_case() -> None:

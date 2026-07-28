@@ -19,8 +19,9 @@ cv2 = pytest.importorskip("cv2", reason="opencv-python is an optional [live] dep
 from gesturebloom.render.overlay import (  # noqa: E402
     HAND_CONNECTIONS,
     draw_hud,
-    draw_param_labels,
+    draw_leader_label,
     draw_skeleton,
+    midpoint_anchor_ndc,
     wrist_anchor_ndc,
 )
 
@@ -59,10 +60,21 @@ def test_skeleton_draws_pixels(frame, landmarks) -> None:
     assert (frame != before).any()
 
 
-def test_labels_and_hud_draw(frame, landmarks) -> None:
-    draw_param_labels(frame, landmarks, PARAMS)
+def test_leader_label_and_hud_draw(frame, landmarks) -> None:
+    draw_leader_label(frame, landmarks, "grow 0.74", (0.3, 0.5))
     draw_hud(frame, PARAMS, fps=60.0, tracking=True, backend="tasks")
     assert (frame > 240).all(axis=2).any(), "expected white text pixels"
+
+
+def test_leader_line_reaches_toward_the_fingertip(frame, landmarks) -> None:
+    """The line is the attribution -- without it you cannot tell which hand owns
+    which number, which is the whole point of a fixed-position label."""
+    before = frame.copy()
+    draw_leader_label(frame, landmarks, "grow 0.74", (0.3, 0.5))
+    changed = np.argwhere((frame != before).any(axis=2))
+    tip_px = np.array([landmarks[8, 1] * frame.shape[0], landmarks[8, 0] * frame.shape[1]])
+    # Some drawn pixel should land near the fingertip.
+    assert np.linalg.norm(changed - tip_px, axis=1).min() < 12
 
 
 @pytest.mark.parametrize("offset", [-8.0, -1.5, 1.5, 8.0])
@@ -71,7 +83,7 @@ def test_off_frame_landmarks_do_not_crash(frame, landmarks, offset: float) -> No
     lm = landmarks.copy()
     lm[:, :2] += offset
     draw_skeleton(frame, lm)
-    draw_param_labels(frame, lm, PARAMS)
+    draw_leader_label(frame, lm, "grow 0.50", (0.3, 0.5))
 
 
 def test_degenerate_landmarks_do_not_crash(frame) -> None:
@@ -82,6 +94,23 @@ def test_degenerate_landmarks_do_not_crash(frame) -> None:
 def test_hud_without_tracking(frame) -> None:
     draw_hud(frame, {}, fps=None, tracking=False)
     assert (frame > 240).all(axis=2).any()
+
+
+def test_hud_shows_per_hand_state(frame) -> None:
+    """Which hand is missing is the first question when a control stops working."""
+    draw_hud(frame, PARAMS, fps=60.0, tracking=True, hands={"Left": True, "Right": False})
+    assert (frame > 240).all(axis=2).any()
+
+
+def test_midpoint_anchor_between_hands() -> None:
+    a = np.zeros((21, 3))
+    a[0] = [0.2, 0.5, 0]
+    b = np.zeros((21, 3))
+    b[0] = [0.8, 0.5, 0]
+    assert midpoint_anchor_ndc(a, b) == pytest.approx((0.0, 0.0))
+    # One hand missing tracks the remaining hand rather than jumping to centre.
+    assert midpoint_anchor_ndc(a, None)[0] == pytest.approx(-0.6)
+    assert midpoint_anchor_ndc(None, None) == pytest.approx((0.0, 0.0))
 
 
 def test_hud_handles_missing_and_extreme_params(frame) -> None:
@@ -111,5 +140,5 @@ def test_overlay_does_not_mutate_landmarks(frame, landmarks) -> None:
     """The overlay must treat landmarks as read-only; they are used downstream."""
     original = landmarks.copy()
     draw_skeleton(frame, landmarks)
-    draw_param_labels(frame, landmarks, PARAMS)
+    draw_leader_label(frame, landmarks, "grow 0.74", (0.3, 0.5))
     np.testing.assert_array_equal(landmarks, original)
