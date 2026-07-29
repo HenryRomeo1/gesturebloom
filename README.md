@@ -1,12 +1,12 @@
+Real-time gesture-driven procedural flower. Hand landmarks from a webcam drive a
+parametric spiderlily rendered on the GPU, with a temporal model that detects
+gesture *events* rather than just classifying frames.
+
 # GestureBloom
 
 [![CI](https://github.com/HenryRomeo1/gesturebloom/actions/workflows/ci.yml/badge.svg)](https://github.com/HenryRomeo1/gesturebloom/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-
-Real-time gesture-driven procedural flower. Hand landmarks from a webcam drive a
-parametric spiderlily rendered on the GPU, with a temporal model that detects
-gesture *events* rather than just classifying frames.
 
 ![Spiderlily bloom progression, grow and bloom from 0 to 1](assets/geometry_preview.svg)
 
